@@ -6,7 +6,11 @@
 //!   `Uminosachi/realisticVisionV51_v51VAE-inpainting`. Fills without a prompt use `lama`, which
 //!   continues the surroundings (object removal), as Photoshop does for an empty prompt.
 //!
-//! The server loads one model at a time, so a fill switches it first when needed.
+//! The server loads one model at a time, so a fill switches it first when needed. After a
+//! prompted fill it is switched back to `lama` in the background, which frees most of the video
+//! memory the diffusion model holds: on a 4 GB card shared with PhotoCraft's own canvas, keeping it
+//! loaded left too little for the window, and the driver dropped PhotoCraft's GPU device.
+//! `PHOTOCRAFT_AI_KEEP_FILL_MODEL=1` keeps it loaded (faster repeated fills on larger cards).
 
 use std::time::Duration;
 
@@ -24,8 +28,17 @@ pub fn service() -> AiService {
     let base = std::env::var("PHOTOCRAFT_AI_URL").ok().map(|u| u.trim().trim_end_matches('/').to_string()).filter(|u| !u.is_empty());
     let base = base.unwrap_or_else(|| DEFAULT_URL.to_string());
     let fill_model = std::env::var("PHOTOCRAFT_AI_FILL_MODEL").ok().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| DEFAULT_FILL_MODEL.to_string());
+    let keep_fill_model = std::env::var("PHOTOCRAFT_AI_KEEP_FILL_MODEL").is_ok_and(|v| v == "1");
     let endpoint = base.clone();
-    let transport: AiTransport = std::sync::Arc::new(move |task: &AiTask| run(&base, &fill_model, task));
+    let transport: AiTransport = std::sync::Arc::new(move |task: &AiTask| {
+        let result = run(&base, &fill_model, task);
+        if !keep_fill_model && matches!(task, AiTask::Inpaint { prompt, .. } if !prompt.is_empty()) {
+            let base = base.clone();
+            // Errors only mean the next object removal switches instead.
+            let _ = std::thread::Builder::new().name("AI model unload".into()).spawn(move || use_model(&base, REMOVE_MODEL));
+        }
+        result
+    });
     AiService { transport: Some(transport), endpoint }
 }
 
