@@ -77,29 +77,35 @@ fn use_model(base: &str, name: &str) -> Result<(), String> {
     post(base, "/api/v1/model", &json!({"name": name}), Duration::from_secs(900)).map(|_| ())
 }
 
+/// IOPaint's inpaint request. Without a `seed` the server picks a random one (`-1`), so each
+/// fill differs, as in Photoshop; its own default is a fixed seed, which repeated every result.
+fn inpaint_body(image: &[u8], mask: &[u8], prompt: &str, negative_prompt: &str, seed: Option<u64>) -> Value {
+    json!({
+        "image": b64(image),
+        "mask": b64(mask),
+        "prompt": prompt,
+        "negative_prompt": negative_prompt,
+        // Large areas are cut into the model's own size around the selection.
+        "hd_strategy": "Crop",
+        "hd_strategy_crop_trigger_size": 800,
+        "hd_strategy_crop_margin": 128,
+        // 25 steps: about a minute on a GTX 980, little visibly different from 30.
+        "sd_steps": 25,
+        "sd_guidance_scale": 7.5,
+        "sd_mask_blur": 8,
+        // Off, as in IOPaint's own UI: matching the fill's colour histogram to the image
+        // flattened fills over plain backgrounds to a few colours.
+        "sd_match_histograms": false,
+        "sd_seed": seed.map_or(-1, |s| (s & u64::from(i32::MAX.unsigned_abs())) as i64),
+    })
+}
+
 fn run(base: &str, fill_model: &str, task: &AiTask) -> Result<Vec<u8>, String> {
     match task {
         AiTask::Inpaint { image, mask, prompt, negative_prompt, seed } => {
             let model = if prompt.is_empty() { REMOVE_MODEL } else { fill_model };
             use_model(base, model)?;
-            let mut body = json!({
-                "image": b64(image),
-                "mask": b64(mask),
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                // Large areas are cut into the model's own size around the selection.
-                "hd_strategy": "Crop",
-                "hd_strategy_crop_trigger_size": 800,
-                "hd_strategy_crop_margin": 128,
-                "sd_steps": 30,
-                "sd_guidance_scale": 7.5,
-                "sd_mask_blur": 8,
-                "sd_match_histograms": true,
-            });
-            if let Some(s) = seed {
-                body["sd_seed"] = json!(*s as i64 & i64::from(i32::MAX));
-            }
-            post(base, "/api/v1/inpaint", &body, Duration::from_secs(900))
+            post(base, "/api/v1/inpaint", &inpaint_body(image, mask, prompt, negative_prompt, *seed), Duration::from_secs(900))
         }
         AiTask::RemoveBackground { image } => {
             post(base, "/api/v1/run_plugin_gen_image", &json!({"name": "RemoveBG", "image": b64(image)}), Duration::from_secs(300))
@@ -154,6 +160,13 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["name"], "RemoveBG");
         assert_eq!(v["image"], "AQID");
+    }
+
+    #[test]
+    fn fills_get_a_random_seed_unless_one_is_given() {
+        assert_eq!(inpaint_body(&[], &[], "a barn", "", None)["sd_seed"], -1);
+        assert_eq!(inpaint_body(&[], &[], "a barn", "", Some(7))["sd_seed"], 7);
+        assert_eq!(inpaint_body(&[], &[], "a barn", "", Some(u64::MAX))["sd_seed"], i64::from(i32::MAX));
     }
 
     #[test]

@@ -14,4 +14,4 @@ $Host.UI.RawUI.WindowTitle = 'PhotoCraft AI server (IOPaint)'
     --host 127.0.0.1 --port 8080 `
     --model lama --device cuda --model-dir "$AiDir\models" `
     --low-mem `
-    --enable-remove-bg --remove-bg-model briaai/RMBG-1.4 --remove-bg-device cuda
+    --enable-remove-bg --remove-bg-model briaai/RMBG-1.4 --remove-bg-device cuda *>&1 | Tee-Object -FilePath "$AiDir\ai-server.log"

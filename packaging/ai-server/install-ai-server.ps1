@@ -10,6 +10,10 @@ $py = "$AiDir\venv\Scripts\python.exe"
 & $py -m pip install --upgrade pip
 & $py -m pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cu126
 & $py -m pip install iopaint==1.6.0
+# IOPaint's Remove Background plugin refuses to start without rembg. Installed without its own
+# dependencies so IOPaint's pins (Pillow 9.5, NumPy 1.26) stay; opencv-python already provides cv2.
+& $py -m pip install --no-deps rembg==2.0.59
+& $py -m pip install onnxruntime pooch pymatting "numpy==1.26.4" "pillow==9.5.0"
 Copy-Item -Force "$PSScriptRoot\start-ai-server.ps1" "$AiDir\start-ai-server.ps1"
 
 # Download the models now rather than on first use.

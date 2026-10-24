@@ -26,7 +26,18 @@ Then start PhotoCraft. Settings, as environment variables:
 
 ## What to expect on older hardware
 
-Measured on a GTX 980 (4 GB) with an i7-930 and 8 GB of RAM. The server keeps one model loaded;
-the first prompted fill after an object removal loads the diffusion model, which takes longest.
-Prompted fills are Stable Diffusion 1.5 quality: good for skies, grass, textures and simple
-objects, weaker than Adobe Firefly for people, hands and text.
+Measured on a GTX 980 (4 GB) with an i7-930 (no AVX) and 8 GB of RAM, 512×512 areas:
+
+| Task | Time |
+|---|---|
+| Remove an object (empty prompt, LaMa) | about 20 s |
+| Remove Background (RMBG-1.4) | about 2 s |
+| Generative Fill with a prompt (25 steps) | about 100 s, plus about 35 s the first time while the model loads |
+
+The server keeps one model loaded, so switching between object removal and prompted fills
+reloads a model. Prompted fills are Stable Diffusion 1.5 quality: good for skies, grass,
+textures and simple objects, weaker than Adobe Firefly for people, hands and text.
+
+Notes for Maxwell cards: use the CUDA 12.6 PyTorch build (`install-ai-server.ps1` does); later
+builds dropped these GPUs. If `CUDA_VISIBLE_DEVICES` is set to `-1` in the Windows environment,
+CUDA programs can't see the card; the start script overrides it for the server only.
