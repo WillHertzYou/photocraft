@@ -4642,6 +4642,7 @@ version = "0.15.1"
 dependencies = [
  "arboard",
  "async-io",
+ "base64 0.22.1",
  "chrono",
  "core-graphics2",
  "dispatch2",

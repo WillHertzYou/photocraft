@@ -609,6 +609,8 @@ pub struct Services {
     pub beep: Option<fn()>,
     /// Starts a background check for published releases (desktop, outside Flatpak).
     pub check_updates: Option<photocraft_engine::updates_cmds::CheckFn>,
+    /// Runs Generative Fill and Remove Background (desktop: HTTP to the AI server).
+    pub ai: Option<photocraft_engine::ai_cmds::AiService>,
     /// Files delivered asynchronously (web drag-and-drop): drained every frame and opened as
     /// documents.
     pub inbox: Option<Inbox>,
@@ -1021,6 +1023,9 @@ pub struct PhotocraftApp {
 impl PhotocraftApp {
     pub fn new(mut session: Session, mut services: Services) -> Self {
         session.updates.check = services.check_updates.take();
+        if let Some(ai) = services.ai.take() {
+            session.ai = ai;
+        }
         let mut app = Self {
             session,
             ui: UiState::default(),

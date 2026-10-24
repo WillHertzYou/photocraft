@@ -55,15 +55,45 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let sample_all = p.get("sampleAllLayers").and_then(Value::as_bool).unwrap_or(false);
     let refine = p.get("refine").and_then(Value::as_bool).unwrap_or(true);
     let area = subject_area(layer, doc.bounds(), sample_all);
+    // With an AI server (desktop), the subject comes from its cut-out model unless the caller
+    // asks for the classical method; if the server can't help, the classical method runs instead.
+    let ai = match p.get("method").and_then(Value::as_str) {
+        Some("classic") => None,
+        _ => s.ai.transport.clone().filter(|_| doc.mode == photocraft_color::ColorMode::Rgb),
+    };
+    let endpoint = s.ai.endpoint.clone();
     crate::jobs::edit_job(
         s,
         "Remove Background",
         move |doc, _, ctx| {
+            let mut ai_error = None;
+            if let Some(ai) = &ai {
+                ctx.progress(0.1, "Finding subject (AI)");
+                let cancel = || ctx.cancelled();
+                match crate::ai_cmds::subject_mask(ai, &endpoint, doc, id, area, sample_all, &cancel) {
+                    Ok(surface) => {
+                        if ctx.cancelled() {
+                            return Err(EngineError::Cancelled);
+                        }
+                        let b = surface.content_bounds();
+                        crate::extra_cmds::background_to_layer_for_mask(doc, id);
+                        let mask = crate::commands::mask_at_depth(LayerMask { surface, ..LayerMask::reveal_all() }, doc.depth)?;
+                        doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
+                        doc.selection = None;
+                        return Ok(([b.x0, b.y0, b.width() as i32, b.height() as i32], "ai", None));
+                    }
+                    // Reported in the result (`aiError`); the classical method runs instead.
+                    Err(e) => ai_error = Some(e),
+                }
+            }
             // Cancel reaches the min cuts inside Select Subject, so Esc doesn't wait for them.
             let found = ctx
                 .stage(0.1, 0.6, "Finding subject", |ctl| with_doc_sampler(doc, Some(id), sample_all, |smp, _| subject::select_subject_with(smp, area, ctl)))
                 .map_err(|_| EngineError::Cancelled)?;
-            let mut region = found.ok_or_else(|| EngineError::Other("no subject found".into()))?;
+            let mut region = found.ok_or_else(|| match &ai_error {
+                Some(e) => EngineError::Other(format!("no subject found (the AI cut-out wasn't available either: {e})")),
+                None => EngineError::Other("no subject found".into()),
+            })?;
             if ctx.cancelled() {
                 return Err(EngineError::Cancelled);
             }
@@ -82,9 +112,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(mask);
             doc.selection = None;
             let b = region.bbox;
-            Ok([b.x0, b.y0, b.width() as i32, b.height() as i32])
+            Ok(([b.x0, b.y0, b.width() as i32, b.height() as i32], "classic", ai_error))
         },
-        move |bounds| json!({ "layer": id.0, "bounds": bounds }),
+        move |(bounds, method, ai_error)| json!({ "layer": id.0, "bounds": bounds, "method": method, "aiError": ai_error }),
     )
 }
 
@@ -95,7 +125,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Remove Background",
         menu: &[],
         shortcut: None,
-        params: r##"{"layer":id?,"sampleAllLayers":bool=false,"refine":bool=true} → {layer,bounds} (adds a layer mask from Select Subject; the Background becomes a normal layer)"##,
+        params: r##"{"layer":id?,"sampleAllLayers":bool=false,"refine":bool=true,"method":"auto|classic"="auto"} → {layer,bounds,method} (adds a layer mask of the subject: from the AI server's cut-out model when one is set up, else Select Subject; the Background becomes a normal layer)"##,
         enabled,
         run,
         journal: true,

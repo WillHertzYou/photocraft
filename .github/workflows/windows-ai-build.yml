@@ -1,0 +1,64 @@
+name: Windows build (AI)
+
+# Builds photocraft.exe from the `ai` branch (Generative Fill and AI Remove Background, see
+# apps/photocraft/src/ai.rs) and publishes it as a pre-release on this fork, so it can be
+# downloaded onto a PC without signing in.
+
+on:
+  push:
+    branches: [ai]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-ai-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The UI and document fonts official builds embed (crates/text/build.rs); optional.
+      - uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: storytold/craft-fonts
+          ref: abb83316d96aa59c1cf64784289e378fe9fa5695
+          path: craft-fonts
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build photocraft.exe
+        shell: bash
+        run: |
+          if [ -d craft-fonts ]; then export CRAFT_FONTS_DIR="$PWD/craft-fonts"; fi
+          cargo build --release --locked -p photocraft
+
+      - name: Test the AI commands
+        shell: bash
+        run: cargo test --locked -p photocraft-engine --lib -- ai_cmds cutout_cmds
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="ai-build-${GITHUB_RUN_NUMBER}"
+          mkdir out
+          cp target/release/photocraft.exe out/
+          (cd out && sha256sum photocraft.exe > photocraft.exe.sha256)
+          gh release create "$tag" out/photocraft.exe out/photocraft.exe.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "PhotoCraft with AI (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Built from ${GITHUB_SHA} on the ai branch. Generative Fill (Edit menu) and AI Remove Background (Properties › Quick Actions) use an IOPaint server, by default http://127.0.0.1:8080 (PHOTOCRAFT_AI_URL)."

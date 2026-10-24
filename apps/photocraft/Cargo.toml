@@ -43,6 +43,8 @@ open = "5"
 ron = "0.12"
 # Background release checks; HTTPS with Rust TLS, no async runtime.
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
+# AI server requests (`ai.rs`) carry images as base64; already in the tree (photocraft-ui-egui).
+base64 = "0.22"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Safe CoreGraphics bindings, compatible with the existing macOS 11 deployment target.

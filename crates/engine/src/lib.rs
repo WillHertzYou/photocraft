@@ -11,6 +11,7 @@ pub mod actions_cmds;
 pub mod actions_edit_cmds;
 pub mod adjust_cmds;
 pub mod adjust_params;
+pub mod ai_cmds;
 pub mod align_cmds;
 mod allocation;
 pub mod analysis_cmds;
@@ -497,6 +498,8 @@ pub struct Session {
     pub prefs: prefs::PrefsStore,
     /// Release checks use an injected platform transport; no network I/O in the engine.
     pub updates: updates_cmds::Updates,
+    /// AI commands (Generative Fill, Remove Background) use an injected transport; see `ai_cmds`.
+    pub ai: ai_cmds::AiService,
     /// Edit menu state: Fade source, custom shape library (see `edit_menu_cmds`).
     pub edit_state: edit_menu_cmds::EditState,
     /// The pattern library (Window › Patterns; see `pattern.*`).
