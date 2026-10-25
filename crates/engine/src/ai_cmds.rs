@@ -7,8 +7,9 @@
 
 use std::sync::Arc;
 
+use photocraft_algo::resample::{Resample, resize_surface_in_canvas};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
-use photocraft_color::{ColorMode, PixelFormat};
+use photocraft_color::{ColorMode, PixelFormat, SampleType};
 use photocraft_doc::{Layer, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::{Surface, from_rgba_into};
@@ -80,6 +81,46 @@ fn can_fill(s: &Session) -> std::result::Result<(), String> {
 pub fn fill_context(sel: Rect, canvas: Rect) -> Rect {
     let pad = i32::try_from((sel.width().max(sel.height()) / 4).max(32)).unwrap_or(i32::MAX);
     sel.inflate(pad).intersect(&canvas)
+}
+
+/// How much to scale a prompted fill's `w`×`h` area up before sending it: diffusion models make
+/// mush well below their own size (512 px for Stable Diffusion 1.5), so the short side goes to
+/// 512 px, with the long side kept to 1024 px.
+fn model_scale(w: u32, h: u32) -> f64 {
+    (512.0 / f64::from(w.min(h))).min(1024.0 / f64::from(w.max(h))).max(1.0)
+}
+
+/// `px` (`w`×`h`, `n` = 1 or 3 channels) resampled to `tw`×`th`.
+fn resample_px(px: &[f32], n: usize, (w, h): (u32, u32), (tw, th): (u32, u32)) -> Vec<f32> {
+    let mode = if n == 1 { ColorMode::Grayscale } else { ColorMode::Rgb };
+    let mut surf = Surface::new(PixelFormat::new(mode, SampleType::F32, false));
+    let area = Rect::new(0, 0, w as i32, h as i32);
+    surf.write_region(area, px);
+    let out = resize_surface_in_canvas(&surf, f64::from(tw) / f64::from(w), f64::from(th) / f64::from(h), Resample::Bicubic, area);
+    out.read_region(Rect::new(0, 0, tw as i32, th as i32))
+}
+
+/// The layer mask for a fill: the selection `cover` (`w`×`h`), widened by a soft `r` px edge. The
+/// server blends its result across the selection's edge (`sd_mask_blur`); a hard mask at the
+/// edge cut that blend off and left the fill's slightly different tone as a visible box.
+fn feathered(cover: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let blur = |src: &[f32], stride: usize, step: usize, len: usize, lines: usize| {
+        let mut out = vec![0.0f32; src.len()];
+        for line in 0..lines {
+            let at = |i: usize| line * stride + i * step;
+            for i in 0..len {
+                let (lo, hi) = (i.saturating_sub(r), (i + r).min(len - 1));
+                let sum: f32 = (lo..=hi).map(|j| src[at(j)]).sum();
+                out[at(i)] = sum / (2 * r + 1) as f32;
+            }
+        }
+        out
+    };
+    let rows = blur(cover, w, 1, w, h);
+    let both = blur(&rows, 1, w, h, w);
+    // A box blur is 0.5 at a straight edge: doubled, the selection stays fully shown and the
+    // edge fades out over `r` px beyond it.
+    cover.iter().zip(both).map(|(c, b)| c.max((2.0 * b).min(1.0))).collect()
 }
 
 fn png_rgb8(w: u32, h: u32, rgb: Vec<u8>) -> Result<Vec<u8>> {
@@ -159,18 +200,36 @@ fn generative_fill(s: &mut Session, p: &Value) -> Result<Value> {
         move |ctx| {
             ctx.progress(0.0, "Preparing the area");
             let (w, h) = (rect.width(), rect.height());
-            let image = png_rgb8(w, h, composite_rgb8(&doc, rect))?;
             let cancel = || ctx.cancelled();
             let cover = crate::fill_cmds::read_window_mask(&sel, rect, &cancel).ok_or(EngineError::Cancelled)?;
-            let mask = png_gray8(w, h, cover.iter().map(|c| if *c > 0.0 { 255 } else { 0 }).collect())?;
+            let rgb = composite_rgb8(&doc, rect);
+            // Object removal (LaMa) works at any size; a prompted fill goes at the model's size.
+            let k = if prompt.is_empty() { 1.0 } else { model_scale(w, h) };
+            let (sw, sh) = ((f64::from(w) * k).round() as u32, (f64::from(h) * k).round() as u32);
+            let (rgb, sent_cover) = if (sw, sh) == (w, h) {
+                (rgb, cover.clone())
+            } else {
+                let px: Vec<f32> = rgb.iter().map(|v| f32::from(*v) / 255.0).collect();
+                (resample_px(&px, 3, (w, h), (sw, sh)).into_iter().map(to_u8).collect(), resample_px(&cover, 1, (w, h), (sw, sh)))
+            };
+            let image = png_rgb8(sw, sh, rgb)?;
+            let threshold = if (sw, sh) == (w, h) { 0.0 } else { 0.5 };
+            let mask = png_gray8(sw, sh, sent_cover.iter().map(|c| if *c > threshold { 255 } else { 0 }).collect())?;
             ctx.check()?;
             ctx.progress(0.1, "Generating (this can take a minute)");
             let task = AiTask::Inpaint { image, mask, prompt, negative_prompt, seed };
             let bytes = ai(&task).map_err(|e| ai_error("Generative Fill", &endpoint, e))?;
             ctx.check()?;
             ctx.progress(0.9, "Adding the result");
-            let px = decode_result(&bytes, w, h, "Generative Fill")?;
-            Ok((px, cover))
+            let mut px = decode_result(&bytes, sw, sh, "Generative Fill")?;
+            if (sw, sh) != (w, h) {
+                let rgb: Vec<f32> = px.iter().flat_map(|p| [p[0], p[1], p[2]]).collect();
+                px = resample_px(&rgb, 3, (sw, sh), (w, h))
+                    .chunks_exact(3)
+                    .map(|c| [c[0].clamp(0.0, 1.0), c[1].clamp(0.0, 1.0), c[2].clamp(0.0, 1.0), 1.0])
+                    .collect();
+            }
+            Ok((px, feathered(&cover, w as usize, h as usize, 8)))
         },
         move |s, (px, cover)| {
             let target = PixelFormat::new(fmt.mode, fmt.sample, true);
@@ -352,11 +411,46 @@ mod tests {
         let l = d.doc.layer(LayerId(r["layer"].as_u64().unwrap())).unwrap();
         assert_eq!(l.name, "a red box");
         let mask = &l.mask.as_ref().unwrap().surface;
-        assert_eq!(mask.content_bounds(), Rect::new(50, 40, 90, 70), "the mask is the selection");
+        assert_eq!(mask.content_bounds(), Rect::new(42, 32, 98, 78), "the mask is the selection with a soft 8 px edge");
+        let at = |x, y| mask.read_region(Rect::new(x, y, x + 1, y + 1))[0];
+        assert_eq!((at(50, 40), at(89, 69)), (1.0, 1.0), "the selection shows fully");
+        assert!(at(46, 55) > 0.0 && at(46, 55) < 1.0 && at(41, 55) == 0.0, "{} {}", at(46, 55), at(41, 55));
         let px = l.surface().unwrap();
         assert_eq!(px.content_bounds(), Rect::new(18, 8, 122, 102), "pixels cover the context area");
         s.execute("edit.undo", json!({})).unwrap();
         assert_eq!(s.active().unwrap().doc.layers.len(), 1, "one undo step");
+    }
+
+    #[test]
+    fn prompted_fills_are_sent_at_the_models_size() {
+        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = sizes.clone();
+        let inner = fake();
+        let recording: AiTransport = Arc::new(move |t: &AiTask| {
+            if let AiTask::Inpaint { image, mask, .. } = t {
+                let (i, m) = (photocraft_codecs::decode(image).unwrap(), photocraft_codecs::decode(mask).unwrap());
+                assert_eq!((i.width(), i.height()), (m.width(), m.height()));
+                seen.lock().unwrap().push((i.width(), i.height()));
+            }
+            inner(t)
+        });
+        let mut s = session_with_selection(Some(recording));
+        // The 104×94 context: short side to 512.
+        let r = s.execute("edit.generativeFill", json!({"prompt": "a red box"})).unwrap();
+        let l = s.active().unwrap().doc.layer(LayerId(r["layer"].as_u64().unwrap())).unwrap();
+        assert_eq!(l.surface().unwrap().content_bounds(), Rect::new(18, 8, 122, 102), "scaled back to the context area");
+        let red = l.surface().unwrap().read_region(Rect::new(70, 55, 71, 56));
+        assert!(red[0] > 0.99 && red[1] < 0.01, "{red:?}");
+        // Object removal goes at the area's own size.
+        s.execute("edit.generativeFill", json!({"prompt": ""})).unwrap();
+        assert_eq!(*sizes.lock().unwrap(), vec![(566, 512), (104, 94)]);
+    }
+
+    #[test]
+    fn the_model_scale_keeps_long_areas_in_bounds() {
+        assert_eq!(model_scale(1000, 800), 1.0);
+        assert_eq!(model_scale(256, 128), 4.0);
+        assert_eq!(model_scale(1000, 100), 1.024);
     }
 
     #[test]
